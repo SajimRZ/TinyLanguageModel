@@ -1,0 +1,9 @@
+.venv/
+checkpoints/
+BackupCheckpoints/
+data/raw/
+personality/
+__pycache__/
+
+/checkpoints1
+/checkpoints2
