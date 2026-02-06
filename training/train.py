@@ -57,6 +57,21 @@ class TrainingConfig:
     use_gradient_checkpointing = True
     use_torch_compile = False
 
+class InteractConfig(TrainingConfig):
+    checkpoint_dir = "./checkpoints/Interact"
+    learning_rate = 3e-5
+    min_lr = 5e-6
+    
+    warmup_iters = 100
+    max_iters = 8000
+    total_iters = 8000
+    
+    dropout = 0.05
+    weight_decay = 0.0
+    grad_clip = 1.0
+
+    batch_size = 8
+    grad_accum_steps = 3
 
 # =====================================================
 # TRAINER
@@ -157,42 +172,30 @@ class Trainer:
         )[0]
 
         dataset = self.datasets[dataset_name]
-        data = dataset.train_data if split == "train" else dataset.val_data
+        if split == "train":
+            data = dataset.train_data
+            mask = getattr(dataset, "train_mask", None)
+        else:
+            data = dataset.val_data
+            mask = getattr(dataset, "val_mask", None)
 
-        if len(data) <= self.config.block_size:
-            return None, None
+        # if len(data) <= self.config.block_size:
+        #     return None, None
 
         ix = torch.randint(
-            len(data) - self.config.block_size,
+            len(data) - self.config.block_size-1,
             (self.config.batch_size,)
         )
 
         x = torch.stack([data[i:i+self.config.block_size] for i in ix])
         y = torch.stack([data[i+1:i+self.config.block_size+1] for i in ix])
-        
-        # ⭐ NEW: Mask everything before assistant response for instruction tuning
-        # Format: ## system\n### user\n#### assistant
-        # We only want to train on the assistant's response
-        
-        # Get the token sequence for "####"
-        assistant_marker = self.tokenizer.encode("####")
-        
-        # For each sequence in the batch
-        for batch_idx in range(x.shape[0]):
-            # Find where #### appears in this sequence
-            for pos in range(len(x[batch_idx]) - len(assistant_marker) + 1):
-                # Check if the marker matches at this position
-                match = all(
-                    x[batch_idx][pos + offset] == assistant_marker[offset]
-                    for offset in range(len(assistant_marker))
-                )
-                
-                if match:
-                    # Mask everything up to and INCLUDING the #### marker
-                    # The model will only learn to predict tokens AFTER ####
-                    mask_until = pos + len(assistant_marker)
-                    y[batch_idx, :mask_until] = -100
-                    break
+
+        if mask is not None:
+            m = torch.stack([mask[i+1:i+self.config.block_size+1] for i in ix])
+
+            y = y.clone()
+            y[m==0] = -100
+
         
         return x.to(self.device), y.to(self.device)
 
@@ -314,12 +317,23 @@ class Trainer:
 
         print(f"Resumed from iter {self.start_iter}")
         return True
+    
+    def load_model_weights(self, path):
+        ckpt = torch.load(path, map_location=self.device)
+        if "model" in ckpt:
+            self.model.load_state_dict(ckpt["model"])
+        else:
+            self.model.load_state_dict(ckpt)
+        print(f"Loaded model weights from {path}")
 
     # =====================================================
     # TRAIN LOOP
     # =====================================================
-    def train(self, resume=True):
-        if resume:
+    def train(self, resume=True, load_model_only = None):
+        if load_model_only is not None:
+            self.load_model_weights(load_model_only)
+            resume = False
+        elif resume:
             self.load_checkpoint()
 
         self.model.train()
@@ -396,50 +410,50 @@ class Trainer:
 if __name__ == "__main__":
     config = TrainingConfig()
 
-    tiny_ds = TinyStoriesDataset(skip=60000, take=10000)
-    ore_ds = LightNovelDataset([
-                                #"oregairu1.pdf","oregairu2.pdf","oregairu3.pdf","oregairu4.pdf","oregairu5.pdf","oregairu6.pdf","oregairu7.pdf",
-                                "ngnl1.pdf","ngnl2.pdf","ngnl3.pdf","ngnl4.pdf","ngnl5.pdf","ngnl6.pdf","ngnl7.pdf",
-                                "oregairu9.pdf","oregairu10.pdf","oregairu11.pdf","oregairu12.pdf","oregairu13.pdf","oregairu14.pdf",
+    # tiny_ds = TinyStoriesDataset(skip=60000, take=10000)
+    # ore_ds = LightNovelDataset([
+    #                             #"oregairu1.pdf","oregairu2.pdf","oregairu3.pdf","oregairu4.pdf","oregairu5.pdf","oregairu6.pdf","oregairu7.pdf",
+    #                             "ngnl1.pdf","ngnl2.pdf","ngnl3.pdf","ngnl4.pdf","ngnl5.pdf","ngnl6.pdf","ngnl7.pdf",
+    #                             "oregairu9.pdf","oregairu10.pdf","oregairu11.pdf","oregairu12.pdf","oregairu13.pdf","oregairu14.pdf",
 
-                                #"alya1.pdf","alya2.pdf","alya3.pdf","alya4.pdf","alya5.pdf","alya6.pdf","alya7.pdf",
+    #                             #"alya1.pdf","alya2.pdf","alya3.pdf","alya4.pdf","alya5.pdf","alya6.pdf","alya7.pdf",
 
-                                "exstep1.pdf","exstep2.pdf","exstep3.pdf","exstep4.pdf","exstep5.pdf","exstep6.pdf","exstep7.pdf",
-                                "exstep8.pdf","exstep9.pdf",
-                                "kono1.pdf","kono2.pdf","kono3.pdf","kono4.pdf","kono5.pdf","kono6.pdf","kono7.pdf","kono8.pdf","kono9.pdf",
+    #                             "exstep1.pdf","exstep2.pdf","exstep3.pdf","exstep4.pdf","exstep5.pdf","exstep6.pdf","exstep7.pdf",
+    #                             "exstep8.pdf","exstep9.pdf",
+    #                             "kono1.pdf","kono2.pdf","kono3.pdf","kono4.pdf","kono5.pdf","kono6.pdf","kono7.pdf","kono8.pdf","kono9.pdf",
 
-                                #"sis1.pdf","sis2.pdf","sis3.pdf","sis4.pdf","sis5.pdf","sis6.pdf","sis7.pdf",
-                                "bungo1.pdf","bungo2.pdf","bungo3.pdf","bungo4.pdf","bungo8.pdf",
-                                "monoln1.pdf","monoln2.pdf","monoln3.pdf","monoln4.pdf","monoln5.pdf","monoln6.pdf","monoln7.pdf",
-                                "monoln8.pdf","monoln9.pdf","monoln10.pdf","monoln11.pdf","monoln12.pdf","monoln13.pdf","monoln14.pdf",
+    #                             #"sis1.pdf","sis2.pdf","sis3.pdf","sis4.pdf","sis5.pdf","sis6.pdf","sis7.pdf",
+    #                             "bungo1.pdf","bungo2.pdf","bungo3.pdf","bungo4.pdf","bungo8.pdf",
+    #                             "monoln1.pdf","monoln2.pdf","monoln3.pdf","monoln4.pdf","monoln5.pdf","monoln6.pdf","monoln7.pdf",
+    #                             "monoln8.pdf","monoln9.pdf","monoln10.pdf","monoln11.pdf","monoln12.pdf","monoln13.pdf","monoln14.pdf",
 
-                                "rascal1.pdf","rascal2.pdf","rascal3.pdf","rascal4.pdf","rascal5.pdf","rascal6.pdf","rascal7.pdf",
-                                "rascal8.pdf","rascal9.pdf","rascal10.pdf","rascal11.pdf","rascal12.pdf","rascal13.pdf","rascal14.pdf",
+    #                             "rascal1.pdf","rascal2.pdf","rascal3.pdf","rascal4.pdf","rascal5.pdf","rascal6.pdf","rascal7.pdf",
+    #                             "rascal8.pdf","rascal9.pdf","rascal10.pdf","rascal11.pdf","rascal12.pdf","rascal13.pdf","rascal14.pdf",
 
-                                ])
+    #                             ])
     
-    book_ds = BookDataset(skip = 120000, take = 100000)
-    reddit_ds = RedditDataset(skip=100000, take=70000) 
-    subhub_ds =  SubtitlesHuggingDataset(skip=300000, take=200000)
+    # book_ds = BookDataset(skip = 120000, take = 100000)
+    # reddit_ds = RedditDataset(skip=100000, take=70000) 
+    # subhub_ds =  SubtitlesHuggingDataset(skip=300000, take=200000)
 
-    dd_ds = DailyDialogDataset()
+    # dd_ds = DailyDialogDataset()
 
-    trainer = Trainer(config, 
-                      {"tiny": tiny_ds,
-                       "books": book_ds,
-                       "oregairu": ore_ds,
-                       "reddit": reddit_ds,
-                       "subhub": subhub_ds,
-                       "daily": dd_ds,
-                       },
-                       mix_ratios={
-                           "tiny":0.05,
-                           "books":0.17,
-                           "oregairu":0.18,
-                           "reddit": 0.25,
-                           "sub_hub":0.18,
-                           "daily": 0.17,
-                       })
+    # trainer = Trainer(config, 
+    #                   {"tiny": tiny_ds,
+    #                    "books": book_ds,
+    #                    "oregairu": ore_ds,
+    #                    "reddit": reddit_ds,
+    #                    "subhub": subhub_ds,
+    #                    "daily": dd_ds,
+    #                    },
+    #                    mix_ratios={
+    #                        "tiny":0.05,
+    #                        "books":0.17,
+    #                        "oregairu":0.18,
+    #                        "reddit": 0.25,
+    #                        "sub_hub":0.18,
+    #                        "daily": 0.17,
+    #                    })
 
-    trainer.train(resume=True)
+    # trainer.train(resume=True)
 #21400

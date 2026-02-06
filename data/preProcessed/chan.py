@@ -5,7 +5,7 @@ from data.preProcessed.base import BaseTokenizer
 
 
 class FourchanDataset:
-    def __init__(self, skip, take, val_split=0.1):
+    def __init__(self, skip, take, val_split=0.1,train_mask = None):
         self.QUOTE_PATTERN = re.compile(r"^\s*>+\s?", re.M)
         self.CONTROL_PATTERN = re.compile(r"[\x00-\x1f\x7f-\x9f]")
         self.URL_PATTERN = re.compile(r"https?://\S+", re.I)

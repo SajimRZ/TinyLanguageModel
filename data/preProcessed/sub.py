@@ -9,7 +9,7 @@ class SubtitleDataset:
     Produces a flat token stream for LM training
     """
 
-    def __init__(self, array_of_series, val_split=0.1):
+    def __init__(self, array_of_series, val_split=0.1,train_mask = None):
         self.tokenizer = BaseTokenizer()
         self.arr = array_of_series
         self.val_split = val_split

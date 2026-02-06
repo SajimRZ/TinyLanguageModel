@@ -5,7 +5,7 @@ from pathlib import Path
 import re
 class DailyDialogDataset:
     """Load DailyDialog from local CSVs with proper turn markers"""
-    def __init__(self):
+    def __init__(self,train_mask = None):
         self.tokenizer = BaseTokenizer()
         cur_dir = Path.cwd()
         # Load CSVs

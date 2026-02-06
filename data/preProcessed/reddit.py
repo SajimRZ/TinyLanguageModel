@@ -11,7 +11,7 @@ class RedditDataset:
     Produces a cleaned flat token stream for LM training
     """
 
-    def __init__(self, skip=0, take=10000, val_split=0.1):
+    def __init__(self, skip=0, take=10000, val_split=0.1,train_mask = None):
         self.tokenizer = BaseTokenizer()
         self.skip = skip
         self.take = take

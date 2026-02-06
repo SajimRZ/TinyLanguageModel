@@ -7,7 +7,7 @@ from data.preProcessed.base import BaseTokenizer
 
 class LightNovelDataset:
 
-    def __init__(self, series, val_split = 0.1):
+    def __init__(self, series, val_split = 0.1,train_mask = None):
         self.tokenizer = BaseTokenizer()
         self.arr = series
         self.val_split = val_split
