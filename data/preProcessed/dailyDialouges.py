@@ -7,6 +7,7 @@ class DailyDialogDataset:
     """Load DailyDialog from local CSVs with proper turn markers"""
     def __init__(self,train_mask = None):
         self.tokenizer = BaseTokenizer()
+        self.train_mask = train_mask
         cur_dir = Path.cwd()
         # Load CSVs
         self.train_df = pd.read_csv(cur_dir/'data'/'raw'/"DDtrain.csv")

@@ -13,6 +13,7 @@ class SubtitlesHuggingDataset:
         self.skip = skip
         self.take = take
         self.val_split = val_split
+        self.train_mask = train_mask
 
         print(f"Loading Subs: skip={skip}, take={take}")
 
@@ -34,9 +35,11 @@ class SubtitlesHuggingDataset:
         # texts.extend(sub_ds.texts)
         # print(f"Combined total subtitle lines: {len(texts):,}")
 
-        split_idx = int((1 - val_split) * len(texts))
-        self.train_data = self.tokenizer.tokenize_texts(texts[:split_idx])
-        self.val_data = self.tokenizer.tokenize_texts(texts[split_idx:])
+        tokens = self.tokenizer.tokenize_texts(texts)
+
+        split_idx = int((1 - val_split) * len(tokens))
+        self.train_data = tokens[:split_idx]
+        self.val_data = tokens[split_idx:]
 
         print(f"Train tokens: {len(self.train_data):,}")
         print(f"Val tokens: {len(self.val_data):,}")

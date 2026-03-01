@@ -32,18 +32,26 @@ class SwiGLU(nn.Module):
         return self.dropout(self.w2(F.silu(self.w1(x)) * self.w3(x)))
 
 class LuminousBlock(nn.Module):
-    def __init__(self, n_embd, n_head, dropout=0.2):
+    def __init__(self, n_embd, n_head, dropout=0.2, n_kv_head=None):
         super().__init__()
         self.n_head = n_head
+        self.n_kv_head = n_kv_head if n_kv_head is not None else n_head
+        if self.n_head % self.n_kv_head != 0:
+            raise ValueError(f"n_head ({self.n_head}) must be divisible by n_kv_head ({self.n_kv_head})")
         self.head_size = n_embd // n_head
+        if n_embd % n_head != 0:
+            raise ValueError(f"n_embd ({n_embd}) must be divisible by n_head ({n_head})")
+        self.kv_repeat = self.n_head // self.n_kv_head
 
         # Attention projections
-        self.wqkv = nn.Linear(n_embd, 3 * n_embd, bias=False)
+        self.wq = nn.Linear(n_embd, n_embd, bias=False)
+        self.wk = nn.Linear(n_embd, self.n_kv_head * self.head_size, bias=False)
+        self.wv = nn.Linear(n_embd, self.n_kv_head * self.head_size, bias=False)
         self.wo = nn.Linear(n_embd, n_embd, bias=False)
         
         # Modern Feed-Forward (SwiGLU)
         # Intermediate size is usually 8/3 of n_embd for SwiGLU
-        intermediate_size = int(8/3 * n_embd)
+        intermediate_size = ((int(8/3 * n_embd) + 255) // 256) * 256
         self.ffn = SwiGLU(n_embd, intermediate_size, dropout)
 
         self.attention_norm = RMSNorm(n_embd)
@@ -56,16 +64,22 @@ class LuminousBlock(nn.Module):
         x = self.attention_norm(x)
         
         B, T, C = x.shape
-        q, k, v = self.wqkv(x).split(C, dim=2)
+        q = self.wq(x)
+        k = self.wk(x)
+        v = self.wv(x)
         
         # Reshape for multi-head
         q = q.view(B, T, self.n_head, self.head_size).transpose(1, 2)
-        k = k.view(B, T, self.n_head, self.head_size).transpose(1, 2)
-        v = v.view(B, T, self.n_head, self.head_size).transpose(1, 2)
+        k = k.view(B, T, self.n_kv_head, self.head_size).transpose(1, 2)
+        v = v.view(B, T, self.n_kv_head, self.head_size).transpose(1, 2)
 
         # Apply RoPE
         q = apply_rotary_emb(q, cos, sin)
         k = apply_rotary_emb(k, cos, sin)
+
+        if self.kv_repeat > 1:
+            k = k.repeat_interleave(self.kv_repeat, dim=1)
+            v = v.repeat_interleave(self.kv_repeat, dim=1)
 
         # Flash Attention (Fast & Memory Efficient)
         out = F.scaled_dot_product_attention(
@@ -82,20 +96,24 @@ class LuminousBlock(nn.Module):
         return x
 
 class LuminousLM(nn.Module):
-    def __init__(self, vocab_size, n_embd=448, n_head=7, n_layer=7, 
-                 block_size=256, dropout=0.1):
+    def __init__(self, vocab_size, n_embd=448, n_head=7, n_layer=7,
+                 block_size=256, dropout=0.1, n_kv_head=None, tie_embeddings=False):
         super().__init__()
+        if n_embd % n_head != 0:
+            raise ValueError(f"n_embd ({n_embd}) must be divisible by n_head ({n_head})")
+        self.n_kv_head = n_kv_head if n_kv_head is not None else n_head
         self.token_embedding = nn.Embedding(vocab_size, n_embd)
         self.layers = nn.ModuleList([
-            LuminousBlock(n_embd, n_head, dropout) for _ in range(n_layer)
+            LuminousBlock(n_embd, n_head, dropout, self.n_kv_head) for _ in range(n_layer)
         ])
         self.norm = RMSNorm(n_embd)
         self.output = nn.Linear(n_embd, vocab_size, bias=False)
 
         self.block_size = block_size
         
-        # Weight tying
-        self.output.weight = self.token_embedding.weight
+        # Optional weight tying (default: untied, as in most modern LLMs)
+        if tie_embeddings:
+            self.output.weight = self.token_embedding.weight
 
         # Pre-compute RoPE frequencies
         head_size = n_embd // n_head
@@ -141,12 +159,12 @@ class LuminousLM(nn.Module):
         
         loss = None
         if targets is not None:
-            # ⭐ MODIFIED: Add ignore_index=-100 for instruct tuning
+            # ⭐ MODIFIED: Add ignore_index=-100 for instruct tuning + epsilon for stability
             loss = F.cross_entropy(
                 logits.view(-1, logits.size(-1)), 
                 targets.view(-1),
                 ignore_index=-100  # Ignores positions where target == -100
-            )
+            ) + 1e-8  # Epsilon prevents numerical instability and loss spikes
         
         return logits, loss
     

@@ -13,14 +13,18 @@ sys.path.append(str(Path(__file__).parent.parent))
 
 from models.model import LuminousLM
 from data.preProcessed.base import BaseTokenizer
-from data.preProcessed.tiny import TinyStoriesDataset
-from data.preProcessed.dailyDialouges import DailyDialogDataset
-from data.preProcessed.sub import SubtitleDataset
-from data.preProcessed.light import LightNovelDataset
-from data.preProcessed.reddit import RedditDataset
-from data.preProcessed.bookcore import BookDataset
-from data.preProcessed.subhub import SubtitlesHuggingDataset
-from data.preProcessed.chan import FourchanDataset
+# from data.preProcessed.tiny import TinyStoriesDataset
+# from data.preProcessed.dailyDialouges import DailyDialogDataset
+# from data.preProcessed.sub import SubtitleDataset
+# from data.preProcessed.light import LightNovelDataset
+# from data.preProcessed.reddit import RedditDataset
+# from data.preProcessed.bookcore import BookDataset
+# from data.preProcessed.subhub import SubtitlesHuggingDataset
+# from data.preProcessed.chan import FourchanDataset
+# from data.preProcessed.ytcom import YTcommentsDataset
+# from data.preProcessed.wiki import WikiDataset
+
+from data.processed.alpacaInst import AlpacaDataset
 
 
 # =====================================================
@@ -39,10 +43,10 @@ class TrainingConfig:
     # -----------------------
     # Training
     # -----------------------
-    batch_size = 12
+    batch_size = 10
     grad_accum_steps = 4
-    max_iters = 6000
-    total_iters = 60000
+    max_iters = 9000
+    total_iters = 30000
     warmup_iters = 2000
     eval_interval = 300
 
@@ -178,27 +182,22 @@ class Trainer:
         else:
             data = dataset.val_data
             mask = getattr(dataset, "val_mask", None)
-
-        # if len(data) <= self.config.block_size:
-        #     return None, None
-
+        
         ix = torch.randint(
-            len(data) - self.config.block_size-1,
-            (self.config.batch_size,)
-        )
-
+            len(data)-self.config.block_size-1,
+            (self.config.batch_size)
+            )
         x = torch.stack([data[i:i+self.config.block_size] for i in ix])
         y = torch.stack([data[i+1:i+self.config.block_size+1] for i in ix])
 
         if mask is not None:
             m = torch.stack([mask[i+1:i+self.config.block_size+1] for i in ix])
-
             y = y.clone()
             y[m==0] = -100
-
         
         return x.to(self.device), y.to(self.device)
-
+    
+    
     # =====================================================
     # EVALUATION
     # =====================================================
@@ -252,7 +251,7 @@ class Trainer:
     @torch.no_grad()
     def generate_sample(
         self,
-        prompt= 'Hey, Long time ',
+        prompt= "### System: You are Lumi. Answer my request below.\n### User: What is a plane?\n",
         max_new_tokens=100,
         min_new_tokens=20,
         temperature=0.8,
@@ -378,11 +377,11 @@ class Trainer:
                 print(f"Datasets wise:")
                 for k in losses.keys():
                     if k.startswith("train_"):
-                        print(f"  {k}: {losses[k]:.4f} || ", end="")
+                        print(f" {k}: {losses[k]:.4f} ||", end="")
                 print()
                 for k in losses.keys():
                     if k.startswith("val_"):
-                        print(f"  {k}: {losses[k]:.4f} || ", end="")
+                        print(f" {k}: {losses[k]:.4f} ||", end="")
                 print()
 
 
@@ -408,32 +407,33 @@ class Trainer:
 # ENTRY POINT
 # =====================================================
 if __name__ == "__main__":
-    config = TrainingConfig()
+    # config = TrainingConfig()
 
-    # tiny_ds = TinyStoriesDataset(skip=60000, take=10000)
+    # tiny_ds = TinyStoriesDataset(skip=180000, take=20000)
     # ore_ds = LightNovelDataset([
-    #                             #"oregairu1.pdf","oregairu2.pdf","oregairu3.pdf","oregairu4.pdf","oregairu5.pdf","oregairu6.pdf","oregairu7.pdf",
+    #                             "oregairu1.pdf","oregairu2.pdf","oregairu3.pdf","oregairu4.pdf","oregairu5.pdf","oregairu6.pdf","oregairu7.pdf",
     #                             "ngnl1.pdf","ngnl2.pdf","ngnl3.pdf","ngnl4.pdf","ngnl5.pdf","ngnl6.pdf","ngnl7.pdf",
     #                             "oregairu9.pdf","oregairu10.pdf","oregairu11.pdf","oregairu12.pdf","oregairu13.pdf","oregairu14.pdf",
 
-    #                             #"alya1.pdf","alya2.pdf","alya3.pdf","alya4.pdf","alya5.pdf","alya6.pdf","alya7.pdf",
+    #                             "alya1.pdf","alya2.pdf","alya3.pdf","alya4.pdf","alya5.pdf","alya6.pdf","alya7.pdf",
 
     #                             "exstep1.pdf","exstep2.pdf","exstep3.pdf","exstep4.pdf","exstep5.pdf","exstep6.pdf","exstep7.pdf",
     #                             "exstep8.pdf","exstep9.pdf",
     #                             "kono1.pdf","kono2.pdf","kono3.pdf","kono4.pdf","kono5.pdf","kono6.pdf","kono7.pdf","kono8.pdf","kono9.pdf",
 
-    #                             #"sis1.pdf","sis2.pdf","sis3.pdf","sis4.pdf","sis5.pdf","sis6.pdf","sis7.pdf",
+    #                             "sis1.pdf","sis2.pdf","sis3.pdf","sis4.pdf","sis5.pdf","sis6.pdf","sis7.pdf",
     #                             "bungo1.pdf","bungo2.pdf","bungo3.pdf","bungo4.pdf","bungo8.pdf",
     #                             "monoln1.pdf","monoln2.pdf","monoln3.pdf","monoln4.pdf","monoln5.pdf","monoln6.pdf","monoln7.pdf",
     #                             "monoln8.pdf","monoln9.pdf","monoln10.pdf","monoln11.pdf","monoln12.pdf","monoln13.pdf","monoln14.pdf",
 
     #                             "rascal1.pdf","rascal2.pdf","rascal3.pdf","rascal4.pdf","rascal5.pdf","rascal6.pdf","rascal7.pdf",
     #                             "rascal8.pdf","rascal9.pdf","rascal10.pdf","rascal11.pdf","rascal12.pdf","rascal13.pdf","rascal14.pdf",
-
     #                             ])
     
-    # book_ds = BookDataset(skip = 120000, take = 100000)
-    # reddit_ds = RedditDataset(skip=100000, take=70000) 
+    # book_ds = BookDataset(skip = 10000, take = 150000)
+    # wiki_ds = WikiDataset(skip=8000, take=3000)
+    # reddit_ds = RedditDataset(skip=130000, take=70000) 
+    # yt_ds = YTcommentsDataset()
     # subhub_ds =  SubtitlesHuggingDataset(skip=300000, take=200000)
 
     # dd_ds = DailyDialogDataset()
@@ -442,18 +442,28 @@ if __name__ == "__main__":
     #                   {"tiny": tiny_ds,
     #                    "books": book_ds,
     #                    "oregairu": ore_ds,
+    #                    "wiki": wiki_ds,
     #                    "reddit": reddit_ds,
+    #                    "yt": yt_ds,
     #                    "subhub": subhub_ds,
     #                    "daily": dd_ds,
     #                    },
     #                    mix_ratios={
     #                        "tiny":0.05,
-    #                        "books":0.17,
-    #                        "oregairu":0.18,
-    #                        "reddit": 0.25,
-    #                        "sub_hub":0.18,
-    #                        "daily": 0.17,
+    #                        "books":0.1,
+    #                        "oregairu":0.1,
+    #                        "wiki":0.2,
+    #                        "reddit": 0.2,
+    #                        "yt": 0.2,
+    #                        "sub_hub":0.1,
+    #                        "daily": 0.05,
     #                    })
 
     # trainer.train(resume=True)
-#21400
+    config = InteractConfig()
+    alpac_ds = AlpacaDataset()
+
+    trainer = Trainer(config,{"alpaca": alpac_ds})
+
+    trainer.train(resume = False, load_model_only="./checkpoints2/checkpoint_latest.pth")
+
