@@ -94,8 +94,15 @@ class FlexiblLineseDataset:
 
         ds = ds.skip(self.skip)
         collected = []
+        fallback_fields = ["text", "message", "content", "body"]
         for sample in islice(ds, self.take):
-            text = sample.get("text", "")
+            text = sample.get(self.text_field, "")
+            if not isinstance(text, str) or not text.strip():
+                for field in fallback_fields:
+                    value = sample.get(field, "")
+                    if isinstance(value, str) and value.strip():
+                        text = value
+                        break
             if isinstance(text, str) and len(text) > 25:
                 collected.append(text)
 

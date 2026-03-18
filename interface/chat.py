@@ -12,7 +12,7 @@ from data.preProcessed.base import BaseTokenizer
 # =====================================================
 # SETTINGS - Change these
 # =====================================================
-CHECKPOINT_PATH = "./checkpoints/Interact/model_best.pth"
+CHECKPOINT_PATH = "./checkpoints/Interact/Checkpoint_latest.pth"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
@@ -22,13 +22,23 @@ class Chat:
         self.tokenizer = BaseTokenizer()
         
         # Model
+        # Load checkpoint to get model config
+        if not os.path.exists(checkpoint_path):
+            print(f"Warning: Checkpoint not found at {checkpoint_path}")
+            return
+        
+        ckpt = torch.load(checkpoint_path, map_location=self.device)
+        config = ckpt.get("config", {})
+        
+        # Create model with config from checkpoint
         self.model = LuminousLM(
-            vocab_size=self.tokenizer.vocab_size,
-            n_embd=512,
-            n_head=8,
-            n_layer=10,
-            block_size=512,
-            dropout=0.0,
+            vocab_size=config.get("vocab_size", self.tokenizer.vocab_size),
+            n_embd=config.get("n_embd", 768),
+            n_head=config.get("n_head", 8),
+            n_layer=config.get("n_layer", 16),
+            block_size=config.get("block_size", 512),
+            dropout=config.get("dropout", 0.0),
+            n_kv_head=config.get("n_kv_head", 2),
         ).to(self.device)
         self.model.eval()
         
@@ -39,9 +49,9 @@ class Chat:
         
         ckpt = torch.load(checkpoint_path, map_location=self.device)
         if "model" in ckpt:
-            self.model.load_state_dict(ckpt["model"])
+            self.model.load_state_dict(ckpt["model"], strict=False)
         else:
-            self.model.load_state_dict(ckpt)
+            self.model.load_state_dict(ckpt, strict=False)
         
         print(f"Loaded checkpoint from {checkpoint_path}")
     
@@ -52,8 +62,8 @@ class Chat:
         min_new_tokens: int = 20,
         temperature: float = 0.8,
         top_k: int = 50
-    ) -> str:
-        """Generate text following train3.py style"""
+    ):
+        """Generate text streaming tokens one at a time"""
         self.model.eval()
         
         ids = torch.tensor(
@@ -63,6 +73,8 @@ class Chat:
         if len(ids) > 0 and ids[-1] == self.tokenizer.eot_token:
             ids = ids[:-1]
         ids = ids.unsqueeze(0)
+        
+        generated_tokens = []
         
         for step in range(max_new_tokens):
             idx = ids[:, -self.model.block_size:]
@@ -79,13 +91,16 @@ class Chat:
             probs = torch.softmax(logits, dim=-1)
             next_id = torch.multinomial(probs, 1)
             ids = torch.cat([ids, next_id], dim=1)
+            generated_tokens.append(next_id.item())
+            
+            # Decode and yield the new token
+            text_chunk = self.tokenizer.decode(generated_tokens)
+            yield text_chunk
             
             if next_id.item() == self.tokenizer.eot_token:
                 break
         
-        text = self.tokenizer.decode(ids[0].tolist())
         self.model.train()
-        return text
     
     def chat(self, user_message: str) -> str:
         """Talk to Lumi"""
@@ -93,7 +108,7 @@ class Chat:
         return self.generate(prompt, max_new_tokens=100)
     
     def interactive(self):
-        """Chat loop"""
+        """Chat loop with streaming output"""
         print("\n✨ Welcome to Lumi! ✨")
         print("Type 'exit' to quit\n")
         
@@ -106,17 +121,19 @@ class Chat:
                     print("👋 Goodbye!")
                     break
                 
+                prompt = f"### System: You are Lumi. Answer my request below.\n## User: {user_input}\n#### Response:"
+                
                 print("Lumi: ", end="", flush=True)
-                response = self.chat(user_input)
-                # Extract just the response part
-                if "#### Response:" in response:
-                    response = response.split("#### Response:")[-1].strip()
-                # Stop at user/system markers
-                for marker in ["## User:", "### System:"]:
-                    if marker in response:
-                        response = response.split(marker)[0].strip()
-                        break
-                print(response)
+                prev_text = ""
+                
+                # Stream tokens and display them
+                for text_chunk in self.generate(prompt, max_new_tokens=100):
+                    # Only print new characters that were generated
+                    new_chars = text_chunk[len(prev_text):]
+                    print(new_chars, end="", flush=True)
+                    prev_text = text_chunk
+                
+                print()  # Newline after response
                 print()
                 
             except KeyboardInterrupt:

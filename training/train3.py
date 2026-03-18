@@ -1,6 +1,7 @@
 import torch
 import os
 import random
+import json
 from pathlib import Path
 from tqdm import tqdm
 import sys
@@ -55,6 +56,9 @@ from data.preProcessed.flexible import FlexibleDataset
 from data.preProcessed.flexible_lines import FlexiblLineseDataset
 
 from data.processed.alpacaInst import AlpacaDataset
+from data.processed.casualConversation import CasualConversationDataset
+from data.processed.chatAlpaca20k import ChatAlpacaDataset
+from data.processed.personaChat import PersonaChatDataset
 
 
 # =====================================================
@@ -139,17 +143,17 @@ class TrainingConfig:
     n_embd = 768  # CHANGED: safe high-capacity setting for 6GB VRAM target
     n_head = 8
     n_kv_head = 2
-    n_layer = 16  # CHANGED: pairs with n_embd=768 (~176M params)
-    block_size = 512
+    n_layer = 16  # CHANGED: pairs with n_embd=768
+    block_size = 1024
     dropout = 0.1
 
     # -----------------------
     # Training
     # -----------------------
-    batch_size = 8
-    grad_accum_steps = 5
+    batch_size = 4
+    grad_accum_steps = 10
     max_iters = 6000
-    total_iters = 27000
+    total_iters = 6000
     warmup_iters = 1200
     eval_interval = 500
 
@@ -159,11 +163,12 @@ class TrainingConfig:
     grad_clip = 0.8
 
     eval_iters = 15
-    checkpoint_dir = "./checkpoints"
+    checkpoint_dir = "./checkpoints2"
 
     use_gradient_checkpointing = True
     use_torch_compile = False
     use_tf32 = True
+    use_8bit_adam = True
     use_fused_adamw = True
 
 class InteractConfig(TrainingConfig):
@@ -172,21 +177,35 @@ class InteractConfig(TrainingConfig):
     min_lr = 5e-6
     
     warmup_iters = 100
-    max_iters = 8000
-    total_iters = 8000
+    max_iters = 6000
+    total_iters = 6000
     
     dropout = 0.05
     weight_decay = 0.0
     grad_clip = 1.0
 
-    batch_size = 8
-    grad_accum_steps = 3
+    batch_size = 4
+    grad_accum_steps = 10
 
 # =====================================================
 # TRAINER
 # =====================================================
 class Trainer:
-    def _build_optimizer(self, use_fused_adamw=False):
+    def _build_optimizer(self, use_fused_adamw=False, use_8bit_adam=False):
+        if use_8bit_adam:
+            if self.device.type != "cuda":
+                raise RuntimeError("8-bit Adam requires CUDA")
+            try:
+                import bitsandbytes as bnb
+            except ImportError as e:
+                raise RuntimeError("bitsandbytes is not available") from e
+
+            return bnb.optim.AdamW8bit(
+                self.model.parameters(),
+                lr=self.config.learning_rate,
+                weight_decay=self.config.weight_decay,
+            )
+
         optimizer_kwargs = {
             "lr": self.config.learning_rate,
             "weight_decay": self.config.weight_decay,
@@ -199,6 +218,9 @@ class Trainer:
         return torch.optim.AdamW(self.model.parameters(), **optimizer_kwargs)
 
     def _enforce_optimizer_backend_flags(self):
+        if getattr(self, "using_8bit_adam", False):
+            return
+
         for group in self.optimizer.param_groups:
             group["foreach"] = False
             if self.fused_adamw_active and self.device.type == "cuda":
@@ -271,18 +293,37 @@ class Trainer:
         print(f"Model parameters: {self.model.get_num_params():,}")
 
         # Optimizer
+        use_8bit_adam = bool(getattr(config, "use_8bit_adam", False))
         use_fused_adamw = bool(getattr(config, "use_fused_adamw", False)) and self.device.type == "cuda"
+        self.using_8bit_adam = False
         self.fused_adamw_active = False
 
+        if use_8bit_adam and self.device.type != "cuda":
+            print("⚠ 8-bit Adam requested but CUDA is unavailable; falling back to standard AdamW")
+            use_8bit_adam = False
+
         try:
-            self.optimizer = self._build_optimizer(use_fused_adamw=use_fused_adamw)
-            self.fused_adamw_active = use_fused_adamw
-            if use_fused_adamw:
+            self.optimizer = self._build_optimizer(
+                use_fused_adamw=use_fused_adamw and not use_8bit_adam,
+                use_8bit_adam=use_8bit_adam,
+            )
+            self.using_8bit_adam = use_8bit_adam
+            self.fused_adamw_active = use_fused_adamw and not use_8bit_adam
+            if self.using_8bit_adam:
+                print("✓ bitsandbytes AdamW8bit enabled")
+            elif self.fused_adamw_active:
                 print("✓ Fused AdamW enabled")
         except (TypeError, RuntimeError) as e:
-            if use_fused_adamw:
+            if use_8bit_adam:
+                print(f"⚠ 8-bit Adam unavailable ({e}); falling back to torch AdamW")
+                self.optimizer = self._build_optimizer(use_fused_adamw=use_fused_adamw, use_8bit_adam=False)
+                self.using_8bit_adam = False
+                self.fused_adamw_active = use_fused_adamw
+                if self.fused_adamw_active:
+                    print("✓ Fused AdamW enabled")
+            elif use_fused_adamw:
                 print(f"⚠ Fused AdamW unavailable ({e}); falling back to standard AdamW")
-                self.optimizer = self._build_optimizer(use_fused_adamw=False)
+                self.optimizer = self._build_optimizer(use_fused_adamw=False, use_8bit_adam=False)
                 self.fused_adamw_active = False
             else:
                 raise
@@ -438,10 +479,10 @@ class Trainer:
     @torch.no_grad()
     def generate_sample(
         self,
-        # prompt="### System: You are Lumi. Answer my request below.\n## User: How are you?\n#### Response:",
-        prompt = "I was looking for you. I'm glad I",
+        # prompt="### System: You are Lumi. Answer my request below.\n## User: What is the name of our planet?\n#### Response:",
+        prompt = "Money, fame, power, I left it all behind. You want it? then go find my treasure. The ",
         max_new_tokens=50,
-        min_new_tokens=20,
+        min_new_tokens=30,
         temperature=0.8,
         top_k=50
     ):
@@ -507,12 +548,23 @@ class Trainer:
                 print(f"  Missing keys: {len(load_result.missing_keys)}")
             if load_result.unexpected_keys:
                 print(f"  Unexpected keys: {len(load_result.unexpected_keys)}")
-        self.optimizer.load_state_dict(ckpt["optimizer"])
-        self._enforce_optimizer_backend_flags()
-        self._move_optimizer_state_to_device()
-        self.scheduler.load_state_dict(ckpt["scheduler"])
-        self.scaler.load_state_dict(ckpt["scaler"])
-        self.start_iter = ckpt["iter"]
+
+        optimizer_loaded = False
+        try:
+            self.optimizer.load_state_dict(ckpt["optimizer"])
+            optimizer_loaded = True
+        except Exception as e:
+            print(f"⚠ Optimizer state mismatch ({e}); keeping newly initialized optimizer state")
+
+        if optimizer_loaded:
+            self._enforce_optimizer_backend_flags()
+            self._move_optimizer_state_to_device()
+            self.scheduler.load_state_dict(ckpt["scheduler"])
+            self.scaler.load_state_dict(ckpt["scaler"])
+            self.start_iter = ckpt["iter"]
+        else:
+            self.start_iter = 0
+
         self.best_val_loss = ckpt["best_val_loss"]
 
         print(f"Resumed from iter {self.start_iter}")
@@ -686,55 +738,97 @@ class Trainer:
 if __name__ == "__main__":
     config = TrainingConfig()
 
-    # fic_ds  = FanFicDataset(skip=4000, take = 1000)
-    c4_ds = FourchanDataset(skip=2000, take=1000)
-    chan_ds = FlexiblLineseDataset("kjj0/4chanpol",skip=0, take=60000)
-    tiny_ds = TinyStoriesDataset(skip=40000, take=20000)
-    ore_ds = LightNovelDataset(series=[])
-    
-    book_ds = BookDataset(skip = 200000, take = 100000)
-    swik_ds = simpleWikiDataset(skip=100000, take=50000)
+    run_meta_path = os.path.join(config.checkpoint_dir, "dataset_run_meta.json")
 
-    cos_ds = FlexibleDataset("kenhktsui/cosmopedia_quality_score_v2", subset="wikihow", skip=20000, take=10000) 
-    stories_ds = FlexibleDataset("kenhktsui/cosmopedia_quality_score_v2", subset="stories", skip=20000, take=10000)
-    edu_ds = FlexibleDataset("HuggingFaceFW/fineweb-edu",subset="default", skip=20000, take=10000)
-    crawl_ds = WebCrawlDataset(skip=0, take=30000)
+    def _load_and_bump_run_count(meta_path):
+        run_count = 0
+        if os.path.exists(meta_path):
+            try:
+                with open(meta_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                run_count = int(data.get("run_count", 0))
+            except (OSError, ValueError, json.JSONDecodeError):
+                run_count = 0
+
+        os.makedirs(os.path.dirname(meta_path), exist_ok=True)
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump({"run_count": run_count + 1}, f)
+
+        return run_count
+
+    run_count = _load_and_bump_run_count(run_meta_path)
+
+    def auto_skip(take, base_skip=0):
+        return base_skip + (run_count * take)
+
+    print(f"Dataset run count: {run_count} | automatic skip = base_skip + run_count * take")
+
+    # fic_ds  = FanFicDataset(skip=1000, take = 1000)
+    falcon_ds = FlexiblLineseDataset("tiiuae/falcon-refinedweb",text_field="content", skip=auto_skip(take=10000, base_skip=-70000), take=10000)
+    tnsfw_ds = FlexiblLineseDataset("Maxx0/Testing_new_nsfw",text_field="message", skip=auto_skip(take=10000, base_skip=-60000), take=10000)
+    altnsfw_ds = FlexiblLineseDataset("mickume/alt_nsfw", skip=auto_skip(take=30000, base_skip=-180000), take=30000)
+    edu_ds = FlexibleDataset("HuggingFaceFW/fineweb-edu", subset="default", skip=auto_skip(take=10000, base_skip=0), take=10000)
+    #essay_ds = FlexibleDataset("qwedsacf/ivypanda-essays", text_field="TEXT", skip=auto_skip(take=3000, base_skip=0), take=3000)
+    c4_ds = FourchanDataset(skip=auto_skip(take=10000, base_skip=-20000), take=10000)
+    chan_ds = FlexiblLineseDataset("kjj0/4chanpol", skip=auto_skip(take=40000, base_skip=0), take=40000)
+    tiny_ds = TinyStoriesDataset(skip=auto_skip(take=10000, base_skip=0), take=10000)
+    #ore_ds = LightNovelDataset(series=[])
+    #book_ds = BookDataset(skip=auto_skip(take=100000, base_skip=0), take=100000)
+    #swik_ds = simpleWikiDataset(skip=auto_skip(take=50000, base_skip=0), take=50000)
+    climb_ds = FlexiblLineseDataset("karpathy/climbmix-400b-shuffle", skip=auto_skip(take=10000, base_skip=-50000), take=10000)
+    fine_ds = FlexiblLineseDataset("HuggingFaceFW/finephrase", text_field="text", subset="all", skip=auto_skip(take=10000, base_skip=-30000), take=10000)
+    cos_ds = FlexibleDataset("kenhktsui/cosmopedia_quality_score_v2", subset="wikihow", skip=auto_skip(take=10000, base_skip=0), take=10000)
+    stories_ds = FlexibleDataset("kenhktsui/cosmopedia_quality_score_v2", subset="stories", skip=auto_skip(take=10000, base_skip=0), take=10000)
+    crawl_ds = WebCrawlDataset(skip=auto_skip(take=10000, base_skip=-40000), take=10000)
     # # # gut_ds = GutenWikiDataset(skip = 0, take=50000)
-    # wiki_ds = WikiDataset(skip=8000, take=4000)
-    reddit_ds = RedditDataset(skip=100000, take=100000) 
-    yt_ds = YTcommentsDataset()
-    subhub_ds =  SubtitlesHuggingDataset(skip=0, take=100000)
+    wiki_ds = WikiDataset(skip=auto_skip(take=4000, base_skip=0), take=4000)
+    reddit_ds = RedditDataset(skip=auto_skip(take=100000, base_skip=0), take=100000)
+    # yt_ds = YTcommentsDataset()
+    subhub_ds = SubtitlesHuggingDataset(skip=auto_skip(take=100000, base_skip=0), take=100000)
+    #webnov_ds = FlexibleDataset("OmniAICreator/RoyalRoad-1.61M", skip=auto_skip(take=1500, base_skip=0), take=1500)
 
     # dd_ds = DailyDialogDataset()
 
     trainer = Trainer(config, 
                       {
                         "tiny": tiny_ds,
-                        "light": ore_ds,
-                        "books": book_ds,
-                        "siwiki": swik_ds,
+                        "fine": fine_ds,
                         "wikihow": cos_ds,
                         "stories": stories_ds,
                         "reddit": reddit_ds,
                         "edu": edu_ds,
-                        "yt": yt_ds,
+                        "crawl": crawl_ds,
+                        "climb": climb_ds,
+                        "wiki": wiki_ds,
+                        # "yt": yt_ds,
                         "subhub": subhub_ds,
                         "chan": chan_ds,
                         "4c": c4_ds,
+                        "tnsfw": tnsfw_ds,
+                        "altnsfw": altnsfw_ds,
+                        # "dd": dd_ds,
+                        # "fanfic": fic_ds,
+                        "falcon": falcon_ds,
                        },
                        mix_ratios={
-                        "tiny": 0.1,
-                        "light": 0.15,
-                        "books": 0.1,
-                        "siwiki": 0.1,
+                        "tiny": 0.02,
+                        "fine": 0.07,
                         "wikihow": 0.05,
-                        "stories": 0.05, 
-                        "reddit": 0.05,
-                        "edu": 0.1,
-                        "yt": 0.05,
+                        "stories": 0.03, 
+                        "reddit": 0.08,
+                        "edu": 0.06,
+                        "crawl": 0.08,
+                        "climb": 0.05,
+                        "wiki": 0.07,
+                        # "yt": 0.06,
                         "subhub": 0.05,
-                        "chan": 0.1,
-                        "4c": 0.1
+                        "chan": 0.07,
+                        "4c": 0.1,
+                        "tnsfw": 0.1,
+                        "altnsfw": 0.07,
+                        # "dd": 0.05,
+                        # "fanfic": 0.05,
+                        "falcon": 0.1,
                        })
 
     trainer.train(resume=True)
