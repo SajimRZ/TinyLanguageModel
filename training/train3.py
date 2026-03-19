@@ -152,13 +152,19 @@ class TrainingConfig:
     # -----------------------
     batch_size = 4
     grad_accum_steps = 10
+    
     max_iters = 6000
-    total_iters = 6000
+    total_iters = 6000 #the imaginary end point (total * grad_accum_steps)
     warmup_iters = 1200
     eval_interval = 500
 
     learning_rate = 3e-4
     min_lr = 5e-5
+    # LR modifications
+    lr_scale_on_resume = 1 # multiply by current LR
+    lr_override_on_resume = None # force LR to set value
+    decay_stretch = 1.8
+    
     weight_decay = 0.01
     grad_clip = 0.8
 
@@ -233,6 +239,40 @@ class Trainer:
             for key, value in state.items():
                 if torch.is_tensor(value):
                     state[key] = value.to(self.device)
+
+    def _apply_lr_controls(self):
+        """Apply optional LR overrides while preserving scheduler progress."""
+        scale = float(getattr(self.config, "lr_scale_on_resume", 1.0))
+        override = getattr(self.config, "lr_override_on_resume", None)
+
+        if override is not None:
+            override = float(override)
+            if override <= 0:
+                print(f"⚠ Ignoring non-positive lr_override_on_resume={override}")
+            else:
+                current_lr = float(self.optimizer.param_groups[0]["lr"])
+                if current_lr > 0:
+                    scale *= (override / current_lr)
+                else:
+                    scale *= 1.0
+
+        if abs(scale - 1.0) < 1e-12:
+            return
+
+        for group in self.optimizer.param_groups:
+            group["lr"] *= scale
+
+        if hasattr(self.scheduler, "base_lrs"):
+            self.scheduler.base_lrs = [lr * scale for lr in self.scheduler.base_lrs]
+        if hasattr(self.scheduler, "_last_lr"):
+            self.scheduler._last_lr = [lr * scale for lr in self.scheduler._last_lr]
+
+        self.config.learning_rate *= scale
+        self.config.min_lr *= scale
+        print(
+            f"✓ Applied LR control: scale={scale:.4f} | "
+            f"current lr={self.optimizer.param_groups[0]['lr']:.2e}"
+        )
 
     def __init__(self, config, datasets, mix_ratios=None):
         self.config = config
@@ -333,13 +373,21 @@ class Trainer:
         # =====================================================
         # 🔥 FIXED LR SCHEDULER (warmup + cosine decay)
         # =====================================================
+        decay_stretch = max(1e-6, float(getattr(config, "decay_stretch", 1.0)))
+        decay_span = max(1, int((config.total_iters - config.warmup_iters) * decay_stretch))
+        if decay_stretch != 1.0:
+            print(
+                f"LR decay stretch active: x{decay_stretch:.2f} "
+                f"(decay span {config.total_iters - config.warmup_iters} -> {decay_span} steps)"
+            )
+
         def lr_lambda(step):
             # step = optimizer step count
             if step < config.warmup_iters:
                 return step / max(1, config.warmup_iters)
 
             progress = (step - config.warmup_iters) / max(
-                1, config.total_iters - config.warmup_iters
+                1, decay_span
             )
             progress = min(progress, 1.0)
 
@@ -480,7 +528,7 @@ class Trainer:
     def generate_sample(
         self,
         # prompt="### System: You are Lumi. Answer my request below.\n## User: What is the name of our planet?\n#### Response:",
-        prompt = "Money, fame, power, I left it all behind. You want it? then go find my treasure. The ",
+        prompt = "zzwho the fuck do you think you are? Do you know how",
         max_new_tokens=50,
         min_new_tokens=30,
         temperature=0.8,
@@ -598,6 +646,8 @@ class Trainer:
             resume = False
         elif resume:
             self.load_checkpoint()
+
+        self._apply_lr_controls()
 
         self.model.train()
         self.optimizer.zero_grad(set_to_none=True)
@@ -764,6 +814,7 @@ if __name__ == "__main__":
     print(f"Dataset run count: {run_count} | automatic skip = base_skip + run_count * take")
 
     # fic_ds  = FanFicDataset(skip=1000, take = 1000)
+    dclm_ds = FlexiblLineseDataset("mlfoundations/dclm-baseline-1.0",skip=auto_skip(take=5000, base_skip=-40000), take=5000)
     falcon_ds = FlexiblLineseDataset("tiiuae/falcon-refinedweb",text_field="content", skip=auto_skip(take=10000, base_skip=-70000), take=10000)
     tnsfw_ds = FlexiblLineseDataset("Maxx0/Testing_new_nsfw",text_field="message", skip=auto_skip(take=10000, base_skip=-60000), take=10000)
     altnsfw_ds = FlexiblLineseDataset("mickume/alt_nsfw", skip=auto_skip(take=30000, base_skip=-180000), take=30000)
@@ -800,6 +851,7 @@ if __name__ == "__main__":
                         "crawl": crawl_ds,
                         "climb": climb_ds,
                         "wiki": wiki_ds,
+                        "dclm": dclm_ds,
                         # "yt": yt_ds,
                         "subhub": subhub_ds,
                         "chan": chan_ds,
@@ -812,20 +864,21 @@ if __name__ == "__main__":
                        },
                        mix_ratios={
                         "tiny": 0.02,
-                        "fine": 0.07,
+                        "fine": 0.08,
                         "wikihow": 0.05,
                         "stories": 0.03, 
-                        "reddit": 0.08,
-                        "edu": 0.06,
-                        "crawl": 0.08,
+                        "reddit": 0.05,
+                        "edu": 0.1,
+                        "crawl": 0.05,
                         "climb": 0.05,
-                        "wiki": 0.07,
+                        "wiki": 0.1,
+                        "dclm": 0.13,
                         # "yt": 0.06,
                         "subhub": 0.05,
-                        "chan": 0.07,
-                        "4c": 0.1,
-                        "tnsfw": 0.1,
-                        "altnsfw": 0.07,
+                        "chan": 0.03,
+                        "4c": 0.05,
+                        "tnsfw": 0.06,
+                        "altnsfw": 0.05,
                         # "dd": 0.05,
                         # "fanfic": 0.05,
                         "falcon": 0.1,

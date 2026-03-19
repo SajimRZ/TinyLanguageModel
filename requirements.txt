@@ -14,3 +14,4 @@ pysubs2
 emoji
 youtube_comment_downloader #from https://github.com/egbertbouman/youtube-comment-downloader/tree/master
 python-dotenv
+zstandard

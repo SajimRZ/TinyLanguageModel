@@ -241,7 +241,7 @@ lumi.interactive_chat(temperature=0.8, top_k=50)
 ```
 User Input
     ↓
-Tokenization (BPE/SentencePiece)
+Tokenization (tiktoken)
     ↓
 Token Embedding
     ↓
