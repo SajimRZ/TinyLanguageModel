@@ -154,16 +154,16 @@ class TrainingConfig:
     grad_accum_steps = 10
     
     max_iters = 6000
-    total_iters = 6000 #the imaginary end point (total * grad_accum_steps)
+    total_iters = 8000 #the imaginary end point (total * grad_accum_steps)
     warmup_iters = 1200
     eval_interval = 500
 
     learning_rate = 3e-4
     min_lr = 5e-5
     # LR modifications
-    lr_scale_on_resume = 1 # multiply by current LR
-    lr_override_on_resume = None # force LR to set value
-    decay_stretch = 1.8
+    lr_scale_on_resume = 1.4e-4 # absolute LR to set on resume when override_on_resume is True
+    override_on_resume = False # True: resume from lr_scale_on_resume, False: keep checkpoint LR
+    decay_stretch = 1.6
     
     weight_decay = 0.01
     grad_clip = 0.8
@@ -240,21 +240,25 @@ class Trainer:
                 if torch.is_tensor(value):
                     state[key] = value.to(self.device)
 
-    def _apply_lr_controls(self):
-        """Apply optional LR overrides while preserving scheduler progress."""
-        scale = float(getattr(self.config, "lr_scale_on_resume", 1.0))
-        override = getattr(self.config, "lr_override_on_resume", None)
+    def _apply_lr_controls(self, resumed_from_checkpoint=False):
+        """Optionally override resumed LR to a target absolute value and keep scheduler progression."""
+        if not resumed_from_checkpoint:
+            return
 
-        if override is not None:
-            override = float(override)
-            if override <= 0:
-                print(f"⚠ Ignoring non-positive lr_override_on_resume={override}")
-            else:
-                current_lr = float(self.optimizer.param_groups[0]["lr"])
-                if current_lr > 0:
-                    scale *= (override / current_lr)
-                else:
-                    scale *= 1.0
+        if not bool(getattr(self.config, "override_on_resume", False)):
+            return
+
+        target_lr = float(getattr(self.config, "lr_scale_on_resume", 0.0))
+        if target_lr <= 0:
+            print(f"⚠ Ignoring non-positive lr_scale_on_resume={target_lr}")
+            return
+
+        current_lr = float(self.optimizer.param_groups[0]["lr"])
+        if current_lr <= 0:
+            print(f"⚠ Cannot override LR because current checkpoint LR is non-positive: {current_lr}")
+            return
+
+        scale = target_lr / current_lr
 
         if abs(scale - 1.0) < 1e-12:
             return
@@ -270,7 +274,7 @@ class Trainer:
         self.config.learning_rate *= scale
         self.config.min_lr *= scale
         print(
-            f"✓ Applied LR control: scale={scale:.4f} | "
+            f"✓ Applied resume LR override: target={target_lr:.2e} | "
             f"current lr={self.optimizer.param_groups[0]['lr']:.2e}"
         )
 
@@ -641,13 +645,14 @@ class Trainer:
     # TRAIN LOOP
     # =====================================================
     def train(self, resume=True, load_model_only=None):
+        resumed_from_checkpoint = False
         if load_model_only is not None:
             self.load_model_weights(load_model_only)
             resume = False
         elif resume:
-            self.load_checkpoint()
+            resumed_from_checkpoint = self.load_checkpoint()
 
-        self._apply_lr_controls()
+        self._apply_lr_controls(resumed_from_checkpoint=resumed_from_checkpoint)
 
         self.model.train()
         self.optimizer.zero_grad(set_to_none=True)
